@@ -15,6 +15,10 @@ pnpm install
 pnpm build
 ```
 
+## Configuration
+
+Copy the `.env-example` file to `.env` and fill in the required values.
+
 ## Usage
 
 To use the browser agent, you can run the following command:
