@@ -1,4 +1,5 @@
 import { openai } from "@ai-sdk/openai";
+import fs from "node:fs/promises";
 import {
   AgentStateStep,
   type AgentState,
@@ -10,9 +11,11 @@ import { SYSTEM_PROMPT } from "./prompts.js";
 import { analyze, elementInteraction, googleSearch, openURL } from "./tools.js";
 import { toHistoryMessage, toSnapshotMessage } from "./messages.js";
 import {
+  withBrowserPage,
   newBrowserContext,
   type BrowserContext,
   type BrowserPage,
+  interactWithBrowser,
 } from "../browser/index.js";
 
 export class Agent {
@@ -78,12 +81,22 @@ export class Agent {
       }
 
       case "elementInteraction": {
-        await this.getPage();
+        const index = nextStep.args!.index;
+        const action = nextStep.args!.action;
 
-        console.info("Waiting for manual element interaction...");
-        await new Promise((resolve) => setTimeout(resolve, 10e3));
+        const page = await this.getPage();
+        const xpath = this.state.currentPage?.elements.xpaths[index];
 
-        console.info("Assuming manual element interaction is done.");
+        if (!xpath) {
+          throw new Error(`XPath not found for index ${index}`);
+        }
+
+        await interactWithBrowser(page, xpath, action);
+
+        // console.info("Waiting for manual element interaction...");
+        // await new Promise((resolve) => setTimeout(resolve, 10e3));
+
+        // console.info("Assuming manual element interaction is done.");
       }
     }
 
@@ -92,17 +105,33 @@ export class Agent {
       const page = await this.getPage();
       await page.waitForLoadState();
 
+      await withBrowserPage(page, "removeHighlightContainer");
       const snapshot = await page.screenshot();
 
-      Object.assign(this.state, {
+      const elements = await withBrowserPage(
+        page,
+        "highlightInteractiveElements"
+      );
+      const elementsSnapshot = await page.screenshot();
+      fs.writeFile("./assets/elements.png", elementsSnapshot);
+
+      this.state = {
+        ...this.state,
         step: AgentStateStep.ANALYZE,
-        currentPage: { url: page.url() },
+
+        currentPage: {
+          url: page.url(),
+          elements: {
+            xpaths: elements,
+            snapshot: elementsSnapshot.toString("base64"),
+          },
+        },
 
         snapshots: {
           current: snapshot.toString("base64"),
           previous: this.state.snapshots?.current,
         },
-      });
+      };
     }
   }
 
@@ -131,7 +160,10 @@ export class Agent {
         ...currentMessages.map((item) => toHistoryMessage(item)),
 
         ...(this.state.snapshots
-          ? [toSnapshotMessage(this.state.snapshots.current)]
+          ? this.state.currentPage &&
+            this.state.step === AgentStateStep.PAGE_INTERACTION
+            ? [toSnapshotMessage(this.state.currentPage.elements.snapshot)]
+            : [toSnapshotMessage(this.state.snapshots.current)]
           : []),
       ],
 

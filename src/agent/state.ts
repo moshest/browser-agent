@@ -8,6 +8,10 @@ export interface AgentState {
 
   currentPage?: {
     url: string;
+    elements: {
+      xpaths: string[];
+      snapshot: AgentStateSnapshot;
+    };
   };
   snapshots?: {
     current: AgentStateSnapshot;
