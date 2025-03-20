@@ -3,7 +3,7 @@ import { Agent } from "./agent/index.js";
 
 const agent = Agent.create({
   prompt:
-    "check the cheapest flight from NYC to anywhere for tomorrow evening (March 20, 2025), departing after 5 PM",
+    "check the cheapest flight from NYC to anywhere for tomorrow evening (March 21, 2025), departing after 5 PM",
 });
 
 while (true) {
