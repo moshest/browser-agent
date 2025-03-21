@@ -1,20 +1,47 @@
 import type { CoreMessage } from "ai";
-import type { AgentStateSnapshot, AgentStateToolCall } from "./state.js";
+import type {
+  AgentStateHistoryItem,
+  AgentStateSnapshot,
+  AgentStateToolCall,
+} from "./state.js";
+import { ANALYZE_PROMPT } from "./prompts.js";
 
 export const toHistoryMessage = (
-  historyItem: AgentStateToolCall
+  historyItem: AgentStateHistoryItem
 ): CoreMessage => {
-  const { tool, args, reasoning } = historyItem;
-  const entries = Object.entries(args ?? {});
+  switch (historyItem.type) {
+    case "error": {
+      const { tool, error } = historyItem;
+      return {
+        role: "user",
+        content: `\`[${tool}]\` Error: ${error}`,
+      };
+    }
 
-  return {
-    role: "assistant",
-    content: `\`[${tool}]\`: ${reasoning}${
-      entries.length > 0
-        ? `\n\n${entries.map(([key, value]) => `${key}: ${value}`).join("\n")}`
-        : ""
-    }`,
-  };
+    case "tool_call": {
+      const { tool, args, reasoning } = historyItem;
+      const entries = Object.entries(args ?? {});
+
+      return {
+        role: "assistant",
+        content: `\`[${tool}]\`: ${reasoning}${
+          entries.length > 0
+            ? `\n\n${entries
+                .map(([key, value]) => `${key}: ${value}`)
+                .join("\n")}`
+            : ""
+        }`,
+      };
+    }
+
+    case "reasoning": {
+      const { reasoning } = historyItem;
+      return {
+        role: "assistant",
+        content: reasoning,
+      };
+    }
+  }
 };
 
 export const toSnapshotMessage = (
@@ -30,3 +57,8 @@ export const toSnapshotMessage = (
     ],
   };
 };
+
+export const ANALYZE_MESSAGE = {
+  role: "assistant" as const,
+  content: ANALYZE_PROMPT,
+} satisfies CoreMessage;
