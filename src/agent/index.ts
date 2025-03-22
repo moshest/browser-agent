@@ -1,5 +1,5 @@
 import { openai } from "@ai-sdk/openai";
-import fs from "node:fs/promises";
+// import fs from "node:fs/promises";
 import {
   AgentStateStep,
   type AgentState,
@@ -80,6 +80,8 @@ export class Agent {
     try {
       await this.exec(historyItem);
     } catch (error) {
+      console.error("Error executing tool:", error);
+
       this.state = {
         ...this.state,
         step: AgentStateStep.ANALYZE,
@@ -96,25 +98,25 @@ export class Agent {
       return;
     }
 
-    if (historyItem.tool !== "analyze") {
-      // retrieve the current page (ie. a new tab was opened)
-      const page = await this.getPage();
-      await page.waitForLoadState();
+    // retrieve the current page (ie. a new tab was opened)
+    const page = await this.getPage();
+    await page.waitForLoadState("networkidle", {
+      timeout: 10e3, // 10 seconds
+    });
 
-      const snapshot = await page.screenshot();
+    const snapshot = await page.screenshot();
 
-      this.state = {
-        ...this.state,
-        step: AgentStateStep.ANALYZE,
+    this.state = {
+      ...this.state,
+      step: AgentStateStep.ANALYZE,
 
-        currentPage: { url: page.url() },
+      currentPage: { url: page.url() },
 
-        snapshots: {
-          current: snapshot.toString("base64"),
-          previous: this.state.snapshots?.current,
-        },
-      };
-    }
+      snapshots: {
+        current: snapshot.toString("base64"),
+        previous: this.state.snapshots?.current,
+      },
+    };
   }
 
   async exec(toolCall: AgentStateToolCall): Promise<void> {
@@ -152,6 +154,7 @@ export class Agent {
         const page = await this.getPage();
         const [element] = await page.observe({
           instruction: where,
+          modelName: "o3-mini",
         });
 
         if (!element) {
@@ -164,7 +167,7 @@ export class Agent {
         }
 
         await page.click(element.selector, {
-          timeout: 50,
+          timeout: 1e3, // 1 second
         });
       }
     }
@@ -173,6 +176,25 @@ export class Agent {
   private async next(): Promise<AgentStateHistoryItem> {
     const prevMessages = this.state.history?.slice(0, -1) ?? [];
     const currentMessages = this.state.history?.slice(-1) ?? [];
+
+    console.log({
+      prevMessages: prevMessages.length,
+      currentMessages: currentMessages.length,
+      step: this.state.step,
+      currSnapshot: !!this.state.snapshots?.current,
+      prevSnapshot: !!this.state.snapshots?.previous,
+    });
+
+    // await Promise.all([
+    //   fs.writeFile("./assets/prev.png", this.state.snapshots?.previous ?? "", {
+    //     encoding: "base64",
+    //   }),
+    //   fs.writeFile(
+    //     "./assets/current.png",
+    //     this.state.snapshots?.current ?? "",
+    //     { encoding: "base64" }
+    //   ),
+    // ]);
 
     const { toolCalls, text } = await generateText({
       model: this.model,
