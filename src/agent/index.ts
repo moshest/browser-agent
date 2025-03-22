@@ -1,27 +1,25 @@
 import { openai } from "@ai-sdk/openai";
-import fs from "node:fs/promises";
+// import fs from "node:fs/promises";
 import {
   AgentStateStep,
   type AgentState,
+  type AgentStateHistoryItem,
   type AgentStateModel,
   type AgentStateToolCall,
 } from "./state.js";
 import { generateText, type LanguageModelV1 } from "ai";
 import { SYSTEM_PROMPT } from "./prompts.js";
-import { analyze, elementInteraction, googleSearch, openURL } from "./tools.js";
-import { toHistoryMessage, toSnapshotMessage } from "./messages.js";
+import { elementInteraction, googleSearch, openURL, wait } from "./tools.js";
 import {
-  withBrowserPage,
-  newBrowserContext,
-  type BrowserContext,
-  type BrowserPage,
-  interactWithBrowser,
-} from "../browser/index.js";
+  ANALYZE_MESSAGE,
+  toHistoryMessage,
+  toSnapshotMessage,
+} from "./messages.js";
+import { Stagehand, type Page } from "@browserbasehq/stagehand";
 
 export class Agent {
   private model: LanguageModelV1;
-  private browserContext: Promise<BrowserContext> | null = null;
-  private pages: BrowserPage[] = [];
+  private stagehand: Promise<Stagehand>;
 
   static create(opts: {
     prompt: string;
@@ -43,27 +41,88 @@ export class Agent {
 
   private constructor(public state: AgentState) {
     this.model = openai(state.model);
+
+    const stagehand = new Stagehand({
+      env: "LOCAL",
+      modelName: state.model,
+
+      localBrowserLaunchOptions: {
+        headless: false,
+        args: ["--disable-web-security"],
+      },
+      logger: () => {},
+    });
+
+    this.stagehand = stagehand.init().then(() => stagehand);
+
+    this.stagehand.catch(() => {
+      // prevent unhandled promise rejection
+    });
   }
 
   async run(): Promise<void> {
-    const nextStep = await this.next();
-    console.log("Next step:", nextStep);
+    const historyItem = await this.next();
+    console.log("Next step:", historyItem);
 
     this.state = {
       ...this.state,
-      history: [...(this.state.history ?? []), nextStep],
+      history: [...(this.state.history ?? []), historyItem],
     };
 
-    switch (nextStep.tool) {
-      case "analyze": {
-        this.state.step = this.state.currentPage
-          ? AgentStateStep.PAGE_INTERACTION
-          : AgentStateStep.NEW_PAGE;
-        break;
-      }
+    if (historyItem.type !== "tool_call") {
+      this.state.step = this.state.currentPage
+        ? AgentStateStep.PAGE_INTERACTION
+        : AgentStateStep.NEW_PAGE;
 
+      return;
+    }
+
+    try {
+      await this.exec(historyItem);
+    } catch (error) {
+      console.error("Error executing tool:", error);
+
+      this.state = {
+        ...this.state,
+        step: AgentStateStep.ANALYZE,
+        history: [
+          ...(this.state.history ?? []),
+          {
+            type: "error",
+            tool: historyItem.tool,
+            error: String((error as Error)?.message || error),
+          },
+        ],
+      };
+
+      return;
+    }
+
+    // retrieve the current page (ie. a new tab was opened)
+    const page = await this.getPage();
+    await page.waitForLoadState("networkidle", {
+      timeout: 10e3, // 10 seconds
+    });
+
+    const snapshot = await page.screenshot();
+
+    this.state = {
+      ...this.state,
+      step: AgentStateStep.ANALYZE,
+
+      currentPage: { url: page.url() },
+
+      snapshots: {
+        current: snapshot.toString("base64"),
+        previous: this.state.snapshots?.current,
+      },
+    };
+  }
+
+  async exec(toolCall: AgentStateToolCall): Promise<void> {
+    switch (toolCall.tool) {
       case "openURL": {
-        const url = nextStep.args!.url;
+        const url = toolCall.args!.url;
         const page = await this.getPage();
 
         await page.goto(url);
@@ -71,7 +130,7 @@ export class Agent {
       }
 
       case "googleSearch": {
-        const query = nextStep.args!.query;
+        const query = toolCall.args!.query;
         const page = await this.getPage();
 
         await page.goto(
@@ -80,66 +139,64 @@ export class Agent {
         break;
       }
 
+      case "wait": {
+        const seconds = toolCall.args!.seconds;
+        const page = await this.getPage();
+
+        await page.waitForTimeout(seconds * 1000);
+        break;
+      }
+
       case "elementInteraction": {
-        const index = nextStep.args!.index;
-        const action = nextStep.args!.action;
+        const action = toolCall.args!.action;
+        const where = toolCall.args!.where;
 
         const page = await this.getPage();
-        const xpath = this.state.currentPage?.elements.xpaths[index];
+        const [element] = await page.observe({
+          instruction: where,
+          modelName: "o3-mini",
+        });
 
-        if (!xpath) {
-          throw new Error(`XPath not found for index ${index}`);
+        if (!element) {
+          throw new Error(`Element not found for instruction: ${where}`);
         }
 
-        await interactWithBrowser(page, xpath, action);
+        if (action !== "click") {
+          // TODO: implement other actions
+          throw new Error(`Unsupported action: ${action}`);
+        }
 
-        // console.info("Waiting for manual element interaction...");
-        // await new Promise((resolve) => setTimeout(resolve, 10e3));
-
-        // console.info("Assuming manual element interaction is done.");
+        await page.click(element.selector, {
+          timeout: 1e3, // 1 second
+        });
       }
-    }
-
-    if (nextStep.tool !== "analyze") {
-      // retrieve the current page (ie. a new tab was opened)
-      const page = await this.getPage();
-      await page.waitForLoadState();
-
-      await withBrowserPage(page, "removeHighlightContainer");
-      const snapshot = await page.screenshot();
-
-      const elements = await withBrowserPage(
-        page,
-        "highlightInteractiveElements"
-      );
-      const elementsSnapshot = await page.screenshot();
-      fs.writeFile("./assets/elements.png", elementsSnapshot);
-
-      this.state = {
-        ...this.state,
-        step: AgentStateStep.ANALYZE,
-
-        currentPage: {
-          url: page.url(),
-          elements: {
-            xpaths: elements,
-            snapshot: elementsSnapshot.toString("base64"),
-          },
-        },
-
-        snapshots: {
-          current: snapshot.toString("base64"),
-          previous: this.state.snapshots?.current,
-        },
-      };
     }
   }
 
-  private async next(): Promise<AgentStateToolCall> {
+  private async next(): Promise<AgentStateHistoryItem> {
     const prevMessages = this.state.history?.slice(0, -1) ?? [];
     const currentMessages = this.state.history?.slice(-1) ?? [];
 
-    const { toolCalls } = await generateText({
+    console.log({
+      prevMessages: prevMessages.length,
+      currentMessages: currentMessages.length,
+      step: this.state.step,
+      currSnapshot: !!this.state.snapshots?.current,
+      prevSnapshot: !!this.state.snapshots?.previous,
+    });
+
+    // await Promise.all([
+    //   fs.writeFile("./assets/prev.png", this.state.snapshots?.previous ?? "", {
+    //     encoding: "base64",
+    //   }),
+    //   fs.writeFile(
+    //     "./assets/current.png",
+    //     this.state.snapshots?.current ?? "",
+    //     { encoding: "base64" }
+    //   ),
+    // ]);
+
+    const { toolCalls, text } = await generateText({
       model: this.model,
       temperature: this.state.temperature,
 
@@ -160,45 +217,62 @@ export class Agent {
         ...currentMessages.map((item) => toHistoryMessage(item)),
 
         ...(this.state.snapshots
-          ? this.state.currentPage &&
-            this.state.step === AgentStateStep.PAGE_INTERACTION
-            ? [toSnapshotMessage(this.state.currentPage.elements.snapshot)]
-            : [toSnapshotMessage(this.state.snapshots.current)]
+          ? [toSnapshotMessage(this.state.snapshots.current)]
+          : []),
+
+        ...(this.state.step === AgentStateStep.ANALYZE
+          ? [ANALYZE_MESSAGE]
           : []),
       ],
 
-      tools: this.getTools(),
-      toolChoice: "required",
+      ...(this.state.step === AgentStateStep.ANALYZE
+        ? {}
+        : {
+            tools: this.getTools(),
+            toolChoice: "required",
+          }),
     });
+
+    if (this.state.step === AgentStateStep.ANALYZE) {
+      return {
+        type: "reasoning",
+        reasoning: text,
+      };
+    }
 
     const toolCall = toolCalls[0]!;
     const { reasoning, ...args } = toolCall.args;
 
     return {
+      type: "tool_call",
       tool: toolCall.toolName,
-      args,
       reasoning,
+      args,
     };
   }
 
   private getTools(): Record<
     string,
-    | typeof analyze
     | typeof openURL
     | typeof googleSearch
+    | typeof wait
     | typeof elementInteraction
   > {
     switch (this.state.step) {
       case AgentStateStep.ANALYZE: {
-        return {
-          analyze,
-        };
+        return {};
       }
 
       case AgentStateStep.NEW_PAGE: {
         return {
           openURL,
-          googleSearch,
+          // googleSearch, - causing problems with captcha
+        };
+      }
+
+      case AgentStateStep.PAGE_WAIT: {
+        return {
+          wait,
         };
       }
 
@@ -210,41 +284,8 @@ export class Agent {
     }
   }
 
-  private async getPage(): Promise<BrowserPage> {
-    if (!this.browserContext) {
-      this.browserContext = newBrowserContext();
-
-      this.browserContext.then(
-        (browserContext) => {
-          browserContext.on("page", (page) => {
-            this.pages.push(page);
-
-            page.on("close", () => {
-              const index = this.pages.indexOf(page);
-              if (index === -1) {
-                return;
-              }
-
-              this.pages.splice(index, this.pages.length - index);
-            });
-          });
-
-          browserContext.on("close", () => {
-            this.browserContext = null;
-          });
-        },
-        () => {
-          this.browserContext = null;
-        }
-      );
-    }
-
-    let page = this.pages.at(-1);
-
-    if (!page) {
-      page = await (await this.browserContext).newPage();
-    }
-
-    return page;
+  private async getPage(): Promise<Page> {
+    const stagehand = await this.stagehand;
+    return stagehand.page;
   }
 }

@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^1.2.5",
+    "@browserbasehq/stagehand": "^1.14.0",
     "ai": "^4.1.61",
     "dotenv": "^16.4.7",
     "playwright": "^1.51.0",

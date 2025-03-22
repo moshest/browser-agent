@@ -1,18 +1,6 @@
 import { tool } from "ai";
 import * as z from "zod";
 
-export const analyze = tool({
-  description:
-    "Analyze the current state of the webpage, assess the progress of the task, identify any missing elements, and determine the next steps to take.",
-  parameters: z.object({
-    reasoning: z
-      .string()
-      .describe(
-        "A detailed explanation of the thought process behind the next action."
-      ),
-  }),
-});
-
 export const openURL = tool({
   description: "Open a URL in a web browser.",
   parameters: z.object({
@@ -29,26 +17,39 @@ export const googleSearch = tool({
   }),
 });
 
+export const wait = tool({
+  description: "Wait for a specified duration.",
+  parameters: z.object({
+    reasoning: z.string().describe("The reasoning for this wait."),
+    duration: z
+      .number()
+      .int()
+      .positive()
+      .max(10)
+      .describe(
+        "The duration to wait, in seconds. This should be a positive integer not exceeding 10 seconds."
+      ),
+  }),
+});
+
 export const elementInteraction = tool({
   description:
-    "Interact with a specific element on the webpage by referring to the number label shown near the element in the screenshot. The action must use the provided index that corresponds to the element's label.",
+    "Interact with a specific element on the webpage using explicit, unambiguous instructions. Every detail must be included so another AI agent can execute the action with precision. Avoid vague terms—always use clear, specific language (e.g., 'click on the blue button labeled \"xyz\" on the left side of the page').",
   parameters: z.object({
     reasoning: z
       .string()
       .describe(
-        "Provide a detailed explanation for interacting with this element. Clearly indicate which of the element indexes is the correct one by referring to the number label that appears next to the element in the screenshot. Make sure to differentiate this label from any other shown numbers (e.g., in calendars) that might be present. Explain your reasoning thoroughly and state the expected outcome of this action."
-      ),
-    index: z
-      .number()
-      .int()
-      .nonnegative()
-      .describe(
-        "The index corresponding to the element's number label as it appears in the screenshot. This label is used to uniquely identify the element for interaction."
+        "Clearly explain why interacting with this element is necessary. Describe the context and the expected outcome of the action to guide subsequent processing."
       ),
     action: z
       .enum(["click", "type", "keypress", "scroll"])
       .describe(
-        "Specify the exact action to perform on the element. Options include 'click' for a mouse click, 'type' for entering text, 'keypress' for simulating a key press, or 'scroll' for scrolling."
+        "Specify the exact action to perform on the element. Options include: 'click' for a mouse click, 'type' for entering text, 'keypress' for simulating a key press, or 'scroll' for scrolling."
+      ),
+    where: z
+      .string()
+      .describe(
+        "Provide a comprehensive, and detailed description of the target element. Include specific attributes such as the exact text, color, position (e.g., 'on the left side of the page'), role, or any distinctive CSS classes/ids that ensure accurate identification. For example: 'blue button with label \"xyz\" on the left side of the page'."
       ),
     text: z
       .string()
